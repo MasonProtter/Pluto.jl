@@ -19,7 +19,8 @@ function parse_custom(notebook::Notebook, cell::Cell)::Expr
         if (ex isa Expr) && (ex.head == :toplevel)
             # if there is more than one expression:
             if count(a -> !(a isa LineNumberNode), ex.args) > 1
-                Expr(:error, "extra token after end of expression\n\nBoundaries: $(expression_boundaries(cell.code))")
+                #Expr(:error, "extra token after end of expression\n\nBoundaries: $(expression_boundaries(cell.code))")
+                Expr(:toplevel, Expr(:toplevel, ex.args...))
             else
                 ex
             end
