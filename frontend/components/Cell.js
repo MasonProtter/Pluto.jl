@@ -145,7 +145,6 @@ export const Cell = ({
             >
                 <span></span>
             </button>
-            <${CellOutput} ...${output} all_completed_promise=${all_completed_promise} requests=${requests} cell_id=${cell_id} />
             <${CellInput}
                 is_hidden=${!errored && code_folded && cm_forced_focus == null}
                 remote_code=${remote_code}
@@ -176,6 +175,7 @@ export const Cell = ({
                 cell_id=${cell_id}
                 notebook_id=${notebook_id}
             />
+            <${CellOutput} ...${output} all_completed_promise=${all_completed_promise} requests=${requests} cell_id=${cell_id} />
             <${RunArea}
                 onClick=${() => {
                     if (running || queued) {
