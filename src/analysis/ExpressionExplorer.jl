@@ -112,6 +112,14 @@ Base.push!(x::Set) = x
 # HELPER FUNCTIONS
 ###
 
+function explore_inner_scoped(ex::Expr, scopestate::ScopeState)::SymbolsState
+    # Because we are entering a new scope, we create a copy of the current scope state, and run it through the expressions.
+    innerscopestate = deepcopy(scopestate)
+    innerscopestate.inglobalscope = false
+
+    return mapfoldl(a -> explore!(a, innerscopestate), union!, ex.args, init=SymbolsState())
+end
+
 # from the source code: https://github.com/JuliaLang/julia/blob/master/src/julia-parser.scm#L9
 const modifiers = [:(+=), :(-=), :(*=), :(/=), :(//=), :(^=), :(÷=), :(%=), :(<<=), :(>>=), :(>>>=), :(&=), :(⊻=), :(≔), :(⩴), :(≕)]
 const modifiers_dotprefixed = [Symbol('.' * String(m)) for m in modifiers]
@@ -274,12 +282,19 @@ function explore!(ex::Expr, scopestate::ScopeState)::SymbolsState
             # function f(x, y) x + y end
             return explore!(Expr(:function, ex.args...), scopestate)
         end
-        assignees = get_assignees(ex.args[1])
+
         val = ex.args[2]
+        # Handle generic types assignments A{B} = C{B, Int}
+        if ex.args[1] isa Expr && ex.args[1].head == :curly
+            assignees, symstate = explore_funcdef!(ex.args[1], scopestate)
+            innersymstate = union!(symstate, explore!(val, scopestate))
+        else
+            assignees = get_assignees(ex.args[1])
+            symstate = innersymstate = explore!(val, scopestate)
+        end
 
         global_assignees = get_global_assignees(assignees, scopestate)
-        
-        symstate = innersymstate = explore!(val, scopestate)
+
         # If we are _not_ assigning a global variable, then this symbol hides any global definition with that name
         push!(scopestate.hiddenglobals, setdiff(assignees, global_assignees)...)
         assigneesymstate = explore!(ex.args[1], scopestate)
@@ -310,12 +325,7 @@ function explore!(ex::Expr, scopestate::ScopeState)::SymbolsState
         return explore!(expanded_expr, scopestate)
     elseif ex.head == :let || ex.head == :for || ex.head == :while
         # Creates local scope
-
-        # Because we are entering a new scope, we create a copy of the current scope state, and run it through the expressions.
-        innerscopestate = deepcopy(scopestate)
-        innerscopestate.inglobalscope = false
-
-        return mapfoldl(a -> explore!(a, innerscopestate), union!, ex.args, init=SymbolsState())
+        return explore_inner_scoped(ex, scopestate)
     elseif ex.head == :macrocall
         # Does not create sccope
         
@@ -367,7 +377,11 @@ function explore!(ex::Expr, scopestate::ScopeState)::SymbolsState
 
         equiv_func = Expr(:function, Expr(:call, structname, structfields...), Expr(:block, nothing))
 
-        return explore!(equiv_func, scopestate)
+        # struct should always be in Global state
+        globalscopestate = deepcopy(scopestate)
+        globalscopestate.inglobalscope = true
+
+        return explore!(equiv_func, globalscopestate)
     elseif ex.head == :generator
         # Creates local scope
 
@@ -376,7 +390,7 @@ function explore!(ex::Expr, scopestate::ScopeState)::SymbolsState
 
         # This is not strictly the normal form of a `for` but that's okay
         return explore!(Expr(:for, ex.args[2:end]..., ex.args[1]), scopestate)
-    elseif ex.head == :function || ex.head == :abstract
+    elseif ex.head == :function || ex.head == :macro || ex.head == :abstract
         symstate = SymbolsState()
         # Creates local scope
 
@@ -387,6 +401,12 @@ function explore!(ex::Expr, scopestate::ScopeState)::SymbolsState
         innerscopestate.inglobalscope = false
 
         funcname, innersymstate = explore_funcdef!(funcroot, innerscopestate)
+        # Macro are called using @funcname, but defined with funcname. We need to change that in our scopestate
+        if ex.head == :macro
+            setdiff!(innerscopestate.hiddenglobals, funcname)
+            funcname = Symbol[Symbol("@$(funcname[1])")]
+            push!(innerscopestate.hiddenglobals, funcname...)
+        end
 
         union!(innersymstate, explore!(Expr(:block, ex.args[2:end]...), innerscopestate))
         
@@ -410,6 +430,27 @@ function explore!(ex::Expr, scopestate::ScopeState)::SymbolsState
 
             # so we insert the function's inner symbol state here, as if it was a `let` block.
             symstate = innersymstate
+        end
+
+        return symstate
+    elseif ex.head == :try
+        symstate = SymbolsState()
+
+        # Handle catch first
+        if ex.args[3] != false
+            union!(symstate, explore_inner_scoped(ex.args[3], scopestate))
+            # If we catch a symbol, it could shadow a global reference, remove it
+            if ex.args[2] != false
+                setdiff!(symstate.references, Symbol[ex.args[2]])
+            end
+        end
+
+        # Handle the try block
+        union!(symstate, explore_inner_scoped(ex.args[1], scopestate))
+
+        # Finally, handle finally
+        if length(ex.args) == 4
+            union!(symstate, explore_inner_scoped(ex.args[4], scopestate))
         end
 
         return symstate
